@@ -1,44 +1,40 @@
-#!/bin/sh
+#!/bin/zsh --no-rcs
+
+IFS=$'\n'
+export PATH=/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin
+
+mspName=""
+mspContactNumber=""
+iconURL=""
+
+# If testingMode is set to 1, the script will not check for the condition file, and always run.
+testingMode=0
+
+conditionFile="/Library/Application Support/${mspName}/setupDone.json"
 
 # Progress 1st with swiftDialog (auto installation at enrollment)
 instance="e" # Name of used instance
 
-LOGO="appstore" # "appstore", "jamf", "mosyleb", "mosylem", "addigy", "microsoft", "ws1", "kandji", "filewave"
+mspDir="/Library/Application Support/${mspName}"
+mspIcon="${mspDir}/images/$(basename "${iconURL}")"
 
 apps=(
+    "Xcode Command Line Tools,/usr/bin/xcodebuild"
+    "Installomator,/usr/local/Installomator/Installomator.sh"
     "swiftDialog,/usr/local/bin/dialog"
-    "dockutil,/usr/local/bin/dockutil"
+    "azcopy,/usr/local/bin/azcopy"
+    "PlistBuddy,/usr/libexec/PlistBuddy"
     "desktoppr,/usr/local/bin/desktoppr"
-    "Apple NewYork Font,/Library/Fonts/NewYork.ttf"
-    "Apple SF Pro Font,/Library/Fonts/SF-Pro.ttf"
-    "Apple SF Mono Font,/Library/Fonts/SF-Mono-Bold.otf"
-    "Apple SF Compact Font,/Library/Fonts/SF-Compact.ttf"
-    "Zoho WorkDrive TrueSync,/Applications/Zoho WorkDrive TrueSync.app"
-    "TextMate,/Applications/TextMate.app"
-    "1Password,/Applications/1Password 7.app"
-    "Mactracker,/Applications/Mactracker.app"
-    "WWDC,/Applications/WWDC.app"
-    "The Unarchiver,/Applications/The Unarchiver.app"
-    "Keka,/Applications/Keka.app"
-    "Brave,/Applications/Brave Browser.app"
-    "Firefox,/Applications/Firefox.app"
-    "Microsoft AutoUpdate,/Library/Application Support/Microsoft/MAU2.0/Microsoft AutoUpdate.app"
-    "Microsoft Edge,/Applications/Microsoft Edge.app"
-    "Microsoft Teams,/Applications/Microsoft Teams.app"
-    "Microsoft Excel,/Applications/Microsoft Excel.app"
-    "Microsoft OneNote,/Applications/Microsoft OneNote.app"
-    "Microsoft Outlook,/Applications/Microsoft Outlook.app"
-    "Microsoft PowerPoint,/Applications/Microsoft PowerPoint.app"
-    "Microsoft Word,/Applications/Microsoft Word.app"
-    "Microsoft OneDrive,/Applications/OneDrive.app"
+    "dockutil,/usr/local/bin/dockutil"
+    "diskspace,/usr/local/bin/diskspace"
 )
 
 # Dialog display settings, change as desired
-title="Installing Apps and other software"
-message="Please wait while we download and install the needed software."
-endMessage="Installation complete! Please reboot to activate FileVault."
+title="Deploying ${mspName} CLT"
+message="Please wait while essential ${mspName} tools are deployed..."
+endMessage="Installation complete! Please restart your Mac to continue"
 displayEndMessageDialog=1 # Should endMessage be shown as a dialog? (0|1)
-errorMessage="A problem was encountered setting up this Mac. Please contact IT."
+errorMessage="A problem was encountered setting up this Mac.<br>Please contact ${mspName} on ${mspContactNumber}"
 
 ######################################################################
 # Progress 1st Dialog
@@ -68,8 +64,9 @@ errorMessage="A problem was encountered setting up this Mac. Please contact IT."
 #
 ######################################################################
 #
-#  This script made by Søren Theilgaard
+#  This script made by Søren Theilgaard and Tully Jagoe
 #  https://github.com/Theile
+#  https://github.com/tully-systima
 #  Twitter and MacAdmins Slack: @theilgaard
 #
 #  Based on the work by Adam Codega:
@@ -89,7 +86,8 @@ errorMessage="A problem was encountered setting up this Mac. Please contact IT."
 #      Or fonts, like:
 #       "Apple SF Pro Font,/Library/Fonts/SF-Pro.ttf"
 ######################################################################
-scriptVersion="9.8"
+scriptVersion="10.0"
+# v. 10.0   : 2025-06-18 : More options for MSP configuration and improved variable handling. Improved conditionFile and added post setup reboot. ~ @tully-systima
 # v.  9.8   : 2023-10-06 : Support for FileWave, and previously Kandji. Update Progress 1st swiftDialog.sh to use native checkmark #1220
 # v.  9.7   : 2022-12-19 : Fix for LOGO_PATH for ws1
 # v.  9.6   : 2022-11-15 : GitHub API call is first, only try alternative if that fails.
@@ -101,312 +99,274 @@ scriptVersion="9.8"
 # v.  9.0   : 2022-05-16 : Based on acodega’s work, I have added progress bar, changed logging and use another log-location, a bit more error handling for Dialog download, added some "|| true"-endings to some lines to not make them fail in Addigy, and some more.
 ######################################################################
 
-export PATH=/usr/bin:/bin:/usr/sbin:/sbin
+# ================================================================================
+# MARK: Check blocking file
+[[ "${testingMode}" -eq 0 ]] && {
+    [[ -f "${conditionFile}" ]] && {
+        echo "1st Setup is already completed, exiting..."
+        exit 0
+    }
+}
 
-# Check before running
-case $LOGO in
-    addigy|microsoft)
-        conditionFile="/var/db/.Progress1stDone"
-        # Addigy and Microsoft Endpoint Manager (Intune) need a check for a touched file
-        if [ -e "$conditionFile" ]; then
-            echo "$LOGO setup detected"
-            echo "$conditionFile exists, so we exit."
-            exit 0
-        else
-            echo "$conditionFile not found, so we continue…"
-        fi
-        ;;
-esac
+# No sleeping
+/usr/bin/caffeinate -d -i -m -u &
+caffeinatepid=$!
+caffexit () {
+    kill "$caffeinatepid" || true
+    printlog "[LOG-END] Status $1"
+    exit $1
+}
 
-# Mark: Constants and logging
-export PATH=/usr/bin:/bin:/usr/sbin:/sbin
-
-log_message="$instance: Progress 1st with Dialog, v$scriptVersion"
-label="P1st-v$scriptVersion"
-
-log_location="/private/var/log/Installomator.log"
+# MARK: Functions
+installomatorLog="/private/var/log/Installomator.log"
 function printlog(){
     timestamp=$(date +%F\ %T)
-    if [[ "$(whoami)" == "root" ]]; then
-        echo "$timestamp :: $label : $1" | tee -a $log_location
-    else
-        echo "$timestamp :: $label : $1"
-    fi
+    [[ "$(stat -f%Su /dev/console)" == "root" ]] && echo "${timestamp} :: ${label} : ${1}" | tee -a "${installomatorLog}" || echo "${timestamp} :: ${label} : ${1}"
 }
-printlog "[LOG-BEGIN] ${log_message}"
+printlog "[LOG-BEGIN] ${logMessage}"
 
 # Internet check
-if [[ "$(nc -z -v -G 10 1.1.1.1 53 2>&1 | grep -io "succeeded")" != "succeeded" ]]; then
+[[ "$(nc -z -v -G 10 1.1.1.1 53 2>&1 | grep -io "succeeded")" != "succeeded" ]] && {
     printlog "ERROR. No internet connection, we cannot continue."
     exit 90
-fi
+}
+
+# Get the MSP Icon
+[[ ! -d "${mspDir}/images" ]] && {
+    sudo mkdir -p "${mspDir}/images"
+    sudo curl -fsSL "${iconURL}" -o "${mspDir}/images/$(basename "${iconURL}")"
+    sudo chown root:wheel "${mspDir}"
+    sudo chmod 755 "${mspDir}"
+    sudo chmod 700 "${mspDir}/images"
+}
+
+# MARK: MDM Agents
+[[ $(profiles -C -v | grep -c "mosyle") -gt 0 ]] && {
+    printlog "Mosyle MDM detected, adding Self-Service"
+    apps+=(
+        "Self Service,/Applications/Self-Service.app"
+    )
+}
+[[ $(profiles -C -v | grep -c "jumpcloud") -gt 0 ]] && {
+    printlog "Jumpcloud MDM detected, adding Jumpcloud Agent"
+    apps+=(
+        "Jumpcloud,/Applications/Jumpcloud.app"
+    )
+}
+
+# MARK: Parse variables
+logMessage="${instance}: Progress 1st with Dialog, v${scriptVersion}"
+label="P1st-v${scriptVersion}"
 
 # Location of dialog and dialog command file
 dialogApp="/usr/local/bin/dialog"
-dialog_command_file="/var/tmp/dialog.log"
-counterFile="/var/tmp/Progress1st.plist"
+dialogCommandFile="/var/tmp/dialog.log"
+progressCounterFile="/var/tmp/Progress1st.plist"
 
 # Counters
-progress_index=0
-step_progress=0
-defaults write $counterFile step -int 0
-progress_total=${#apps[@]}
-printlog "Total watched installations: $progress_total"
+progressIndex=0
+stepProgress=0
+defaults write ${progressCounterFile} step -int 0
+progressTotal=${#apps[@]}
+printlog "Total watched installations: ${progressTotal}"
+printlog "mspIcon: ${mspIcon}"
 
-# Using LOGO variable to specify MDM and shown logo
-case $LOGO in
-    appstore)
-        # Apple App Store on Mac
-        if [[ $(sw_vers -buildVersion) > "19" ]]; then
-            LOGO_PATH="/System/Applications/App Store.app/Contents/Resources/AppIcon.icns"
-        else
-            LOGO_PATH="/Applications/App Store.app/Contents/Resources/AppIcon.icns"
-        fi
-        ;;
-    jamf)
-        # Jamf Pro
-        LOGO_PATH="/Library/Application Support/JAMF/Jamf.app/Contents/Resources/AppIcon.icns"
-        ;;
-    mosyleb)
-        # Mosyle Business
-        LOGO_PATH="/Applications/Self-Service.app/Contents/Resources/AppIcon.icns"
-        ;;
-    mosylem)
-        # Mosyle Manager (education)
-        LOGO_PATH="/Applications/Manager.app/Contents/Resources/AppIcon.icns"
-        ;;
-    addigy)
-        # Addigy
-        LOGO_PATH="/Library/Addigy/macmanage/MacManage.app/Contents/Resources/atom.icns"
-        ;;
-    microsoft)
-        # Microsoft Endpoint Manager (Intune)
-        LOGO_PATH="/Library/Intune/Microsoft Intune Agent.app/Contents/Resources/AppIcon.icns"
-        ;;
-    ws1)
-        # Workspace ONE (AirWatch)
-        LOGO_PATH="/Applications/Workspace ONE Intelligent Hub.app/Contents/Resources/AppIcon.icns"
-        ;;
-    kandji)
-        # Kandji
-        LOGO="/Applications/Kandji Self Service.app/Contents/Resources/AppIcon.icns"
-        ;;
-    filewave)
-        # FileWave
-        LOGO="/usr/local/sbin/FileWave.app/Contents/Resources/fwGUI.app/Contents/Resources/kiosk.icns"
-        ;;
-esac
-if [[ ! -a "${LOGO_PATH}" ]]; then
-    printlog "ERROR in LOGO_PATH '${LOGO_PATH}', setting Mac App Store."
-    if [[ $(/usr/bin/sw_vers -buildVersion) > "19" ]]; then
-        LOGO_PATH="/System/Applications/App Store.app/Contents/Resources/AppIcon.icns"
-    else
-        LOGO_PATH="/Applications/App Store.app/Contents/Resources/AppIcon.icns"
-    fi
-fi
-printlog "LOGO: $LOGO – LOGO_PATH: $LOGO_PATH"
+# Wait for sign in
+waitForUser(){
+    # From @acodega
+    setupAssistantProcess=$(pgrep -l "Setup Assistant")
+    until [[ "${setupAssistantProcess}" = "" ]]; do
+        printlog "Setup Assistant Still Running. PID ${setupAssistantProcess}"
+        sleep 1
+        setupAssistantProcess=$(pgrep -l "Setup Assistant")
+    done
+    printlog "Out of Setup Assistant"
+    printlog "Logged in user is $(scutil <<< "show State:/Users/ConsoleUser" | awk '/Name :/ { print $3 }')"
 
-# Mark: Functions
+    finderProcess=$(pgrep -l "Finder")
+    until [[ "${finderProcess}" != "" ]]; do
+    printlog "Finder process not found. Assuming device is at login screen. PID ${finderProcess}"
+        sleep 1
+        finderProcess=$(pgrep -l "Finder")
+    done
+    printlog "Finder is running"
+    printlog "Logged in user is $(scutil <<< "show State:/Users/ConsoleUser" | awk '/Name :/ { print $3 }')"
+
+    # Get the current logged in user
+    username=$(stat -f "%Su" /dev/console)
+    uid=$(id -u "${username}")
+    printlog "Logged in user is ${username} with ID ${uid}"
+}
+
 # execute a dialog command
-echo "" > $dialog_command_file || true
+echo "" > "${dialogCommandFile}" || true
 function dialog_command(){
-    printlog "Dialog-command: $1"
-    echo "$1" >> $dialog_command_file || true
+    printlog "Dialog-command: ${1}"
+    echo "${1}" >> "${dialogCommandFile}" || true
+}
+
+# MARK: Install Dialog
+installDialog() {
+    printlog "Installing Dialog..."
+    # Embed the MSP icon into the Dialog app
+    [[ -f "/Library/Application Support/Dialog/Dialog.png" ]] && {
+        printlog "Pre-embedding MSP icon into Dialog..."
+        sudo mkdir -p "/Library/Application Support/Dialog"
+        sudo cp "${mspIcon}" "/Library/Application Support/Dialog/Dialog.png"
+    }
+
+    # Get latest Dialog download URL from GitHub API
+    printlog "Getting latest Dialog release from GitHub..."
+    dialogInstallURL=$(curl -sfL "https://api.github.com/repos/swiftDialog/swiftDialog/releases/latest" | awk -F '"' '/"browser_download_url":/ { print $4 }' | head -1)
+
+    printlog "Dialog download URL: ${dialogInstallURL}"
+
+    # Download Dialog installer
+    dialogPKG="/tmp/install_swiftDialog.pkg"
+    printlog "Downloading Dialog installer..."
+    sudo curl -fsSL "${dialogInstallURL}" -o "${dialogPKG}"
+
+    [[ ! -f "${dialogPKG}" ]] && {
+        printlog "ERROR: Failed to download Dialog installer"
+        exit 91
+    }
+
+    # Install Dialog
+    printlog "Installing Dialog..."
+    sudo installer -pkg "${dialogPKG}" -target /
+
+    # Verify installation
+    [[ ! -x "${dialogApp}" ]] && {
+        printlog "ERROR: Dialog installation failed"
+        exit 92
+    }
+
+    printlog "Dialog installed successfully"
+
+    # Clean up
+    rm -f "${dialogPKG}"
 }
 
 function appCheck(){
-    dialog_command "listitem: $(echo "$app" | cut -d ',' -f1): wait"
-    while [ ! -e "$(echo "$app" | cut -d ',' -f2)" ]; do
+    dialog_command "listitem: $(echo "${app}" | cut -d ',' -f1): wait"
+    while [[ ! -e "$(echo "${app}" | cut -d ',' -f2)" ]]; do
         sleep 2
     done
-    dialog_command "progresstext: Install of “$(echo "$app" | cut -d ',' -f1)” complete"
-    dialog_command "listitem: $(echo "$app" | cut -d ',' -f1): success"
-    progress_index=$(defaults read $counterFile step)
-    progress_index=$(( progress_index + 1 ))
-    defaults write $counterFile step -int $progress_index
-    dialog_command "progress: $progress_index"
-    printlog "at item number $progress_index"
+    dialog_command "progresstext: Install of “$(echo "${app}" | cut -d ',' -f1)” complete"
+    dialog_command "listitem: $(echo "${app}" | cut -d ',' -f1): success"
+    progressIndex=$(defaults read "${progressCounterFile}" step)
+    progressIndex=$(( progressIndex + 1 ))
+    defaults write "${progressCounterFile}" step -int "${progressIndex}"
+    dialog_command "progress: ${progressIndex}"
+    printlog "at item number ${progressIndex}"
 }
 
-# Notify the user using AppleScript
-function displayDialog(){
-    if [[ "$currentUser" != "" ]]; then
-        launchctl asuser $currentUserID sudo -u $currentUser osascript -e "button returned of (display dialog \"$message\" buttons {\"OK\"} default button \"OK\" with icon POSIX file \"$LOGO_PATH\")" || true
-    fi
+# Install Dialog
+[[ ! -e "${dialogApp}" ]] && {
+    installDialog
+} || {
+    printlog "Dialog already installed"
 }
 
-# Mark: Code
-name="Dialog"
-printlog "$name check for installation"
-# download URL, version and Expected Team ID
-# Method for GitHub pkg w. app version check
-gitusername="swiftDialog"
-gitreponame="swiftDialog"
-#printlog "$gitusername $gitreponame"
-filetype="pkg"
-downloadURL=$(curl -sfL "https://api.github.com/repos/$gitusername/$gitreponame/releases/latest" | awk -F '"' "/browser_download_url/ && /$filetype\"/ { print \$4; exit }")
-if [[ "$(echo $downloadURL | grep -ioE "https.*.$filetype")" == "" ]]; then
-    printlog "GitHub API failed, trying failover."
-    #downloadURL="https://github.com$(curl -sfL "https://github.com/$gitusername/$gitreponame/releases/latest" | tr '"' "\n" | grep -i "^/.*\/releases\/download\/.*\.$filetype" | head -1)"
-    downloadURL="https://github.com$(curl -sfL "$(curl -sfL "https://github.com/$gitusername/$gitreponame/releases/latest" | tr '"' "\n" | grep -i "expanded_assets" | head -1)" | tr '"' "\n" | grep -i "^/.*\/releases\/download\/.*\.$filetype" | head -1)"
-fi
-#printlog "$downloadURL"
-appNewVersion=$(curl -sLI "https://github.com/$gitusername/$gitreponame/releases/latest" | grep -i "^location" | tr "/" "\n" | tail -1 | sed 's/[^0-9\.]//g')
-#printlog "$appNewVersion"
-expectedTeamID="PWA5E9TQ59"
-destFile="/Library/Application Support/Dialog/Dialog.app"
-versionKey="CFBundleShortVersionString" #CFBundleVersion
-
-currentInstalledVersion="$(defaults read "${destFile}/Contents/Info.plist" $versionKey || true)"
-printlog "${name} version: $currentInstalledVersion"
-destFile="/usr/local/bin/dialog"
-if [[ ! -e "${destFile}" || "$currentInstalledVersion" != "$appNewVersion" ]]; then
-    printlog "$name not found or version not latest."
-    printlog "${destFile}"
-    printlog "Installing version ${appNewVersion}…"
-    # Create temporary working directory
-    tmpDir="$(mktemp -d || true)"
-    printlog "Created working directory '$tmpDir'"
-    # Download the installer package
-    printlog "Downloading $name package version $appNewVersion from: $downloadURL"
-    installationCount=0
-    exitCode=9
-    while [[ $installationCount -lt 3 && $exitCode -gt 0 ]]; do
-        curlDownload=$(curl -Ls "$downloadURL" -o "$tmpDir/$name.pkg" || true)
-        curlDownloadStatus=$(echo $?)
-        if [[ $curlDownloadStatus -ne 0 ]]; then
-            printlog "error downloading $downloadURL, with status $curlDownloadStatus"
-            printlog "${curlDownload}"
-            exitCode=1
-        else
-            printlog "Download $name succes."
-            # Verify the download
-            teamID=$(spctl -a -vv -t install "$tmpDir/$name.pkg" 2>&1 | awk '/origin=/ {print $NF }' | tr -d '()' || true)
-            printlog "Team ID for downloaded package: $teamID"
-            # Install the package if Team ID validates
-            if [ "$expectedTeamID" = "$teamID" ] || [ "$expectedTeamID" = "" ]; then
-                printlog "$name package verified. Installing package '$tmpDir/$name.pkg'."
-                pkgInstall=$(installer -verbose -dumplog -pkg "$tmpDir/$name.pkg" -target "/" 2>&1)
-                pkgInstallStatus=$(echo $?)
-                if [[ $pkgInstallStatus -ne 0 ]]; then
-                    printlog "ERROR. $name package installation failed."
-                    printlog "${pkgInstall}"
-                    exitCode=2
-                else
-                    printlog "Installing $name package succes."
-                    exitCode=0
-                fi
-            else
-                printlog "ERROR. Package verification failed for $name before package installation could start. Download link may be invalid."
-                exitCode=3
-            fi
-        fi
-        ((installationCount++))
-        printlog "$installationCount time(s), exitCode $exitCode"
-        if [[ $installationCount -lt 3 ]]; then
-            if [[ $exitCode -gt 0 ]]; then
-                printlog "Sleep a bit before trying download and install again. $installationCount time(s)."
-                printlog "Remove $(rm -fv "$tmpDir/$name.pkg" || true)"
-                sleep 2
-            fi
-        else
-            printlog "Download and install of $name succes."
-        fi
-    done
-    # Remove the temporary working directory
-    printlog "Deleting working directory '$tmpDir' and its contents."
-    printlog "Remove $(rm -Rfv "${tmpDir}" || true)"
-    # Handle installation errors
-    if [[ $exitCode != 0 ]]; then
-        printlog "ERROR. Installation of $name failed. Aborting."
-        caffexit $exitCode
-    else
-        printlog "$name version $appNewVersion installed!"
-    fi
-else
-    printlog "$name version $appNewVersion already found. Perfect!"
-fi
-
-
-while [ "$(pgrep -l "Setup Assistant")" != "" ]; do
-    printlog "Setup Assistant Still Running. PID $setupAssistantProcess."
-    sleep 1
-done
-printlog "Out of Setup Assistant."
-
-while [ "$(pgrep -l "Finder")" = "" ]; do
-    printlog "Finder process not found. Assuming device is at login screen. PID $finderProcess"
-    sleep 1
-done
-printlog "Finder is running…"
-
-currentUser=$(stat -f "%Su" /dev/console)
-currentUserID=$(id -u "$currentUser")
-printlog "Logged in user is $currentUser with ID $currentUserID"
-
-# set icon based on whether computer is a desktop or laptop
-#hwType=$(system_profiler SPHardwareDataType | grep "Model Identifier" | grep "Book" || true)
-#if [ "$hwType" != "" ]; then
-#    LOGO_PATH="SF=laptopcomputer.and.arrow.down,weight=thin,colour1=#51a3ef,colour2=#5154ef"
-#else
-#    LOGO_PATH="SF=desktopcomputer.and.arrow.down,weight=thin,colour1=#51a3ef,colour2=#5154ef"
-#fi
-
-dialogCMD="$dialogApp -p --title \"$title\" \
---message \"$message\" \
---icon \"$LOGO_PATH\" \
---progress $progress_total \
+# MARK Run Dialog
+dialogCMD="\"${dialogApp}\" --title \"${title}\" \
+--message \"${message}\" \
+--icon \"${mspIcon}\" \
+--progress ${progressTotal} \
 --button1text \"Please Wait\" \
---button1disabled"
+--button1disabled \
+--button2text \"Cancel\" \
+--button2disabled \
+--blurscreen \
+--ontop"
 
-# create the list of apps
+# Create the list of apps
 listitems=""
 for app in "${apps[@]}"; do
-  listitems="$listitems --listitem '$(echo "$app" | cut -d ',' -f1)'"
+  listitems="${listitems} --listitem '$(echo "${app}" | cut -d ',' -f1)'"
 done
 
-# final command to execute
-dialogCMD="$dialogCMD $listitems"
+# Final command to execute
+dialogCMD="${dialogCMD} ${listitems}"
+printlog "${dialogCMD}"
 
-printlog "$dialogCMD"
+# Wait for user login to complete
+waitForUser
 
 # Launch dialog and run it in the background sleep for a second to let thing initialise
-printlog "About to launch Dialog."
-eval "$dialogCMD" &
+printlog "Starting Dialog as ${username}"
+launchctl asuser "${uid}" sudo -iu "${username}" bash -c "${dialogCMD}" &
 sleep 2
 
 (for app in "${apps[@]}"; do
-    #step_progress=$(( 1 + progress_index ))
-    #dialog_command "progress: $step_progress"
+    #stepProgress=$(( 1 + progressIndex ))
+    #dialog_command "progress: $stepProgress"
     sleep 0.5
     appCheck &
 done
 
 wait)
 
-# Mark: Finishing
+# ================================================================================
+# MARK: Finishing
 
 # Prevent re-run of script if conditionFile is set
-if [[ ! -z "$conditionFile" ]]; then
-    printlog "Touching condition file so script will not run again"
-    touch "$conditionFile" || true
-    printlog "$(ls -al "$conditionFile" || true)"
-fi
+[[ ! -f "${conditionFile}" ]] && {
+    echo "{}" > "${conditionFile}" || true
+}
+printlog "Marking script as completed"
+echo "{}" > "${conditionFile}" || true
+jq --arg date "$(date +%d/%m/%y)" '. + {"1stSetupDone": $date}' "${conditionFile}" > "${conditionFile}.tmp" && sudo mv "${conditionFile}.tmp" "${conditionFile}"
+rm -f "${conditionFile}.tmp"
 
-# all done. close off processing and enable the "Done" button
-printlog "Finalizing."
-dialog_command "progresstext: $endMessage"
 dialog_command "progress: complete"
-dialog_command "button1text: Done"
+dialog_command "progresstext: Deployment complete!"
+echo -e "[SUCCESS]: 1st Setup is complete"
+sleep 3
+
+# Display the end message and restart countdown
+printlog "Finalizing."
+
+# MARK: Restart countdown
+# 60 second countdown with restart functionality
 dialog_command "button1: enable"
+dialog_command "button2: enable"
+dialog_command "button1text: Restart Now"
+dialog_command "button2text: Cancel Restart"
+dialog_command "progress: complete"
+dialog_command "activate:"
+countdown=60
+restart=true
+while [[ "${countdown}" -gt 0 && "${restart}" = true ]]; do
+    case $? in
+        0)
+            printlog "Restart button pressed"
+            restart=true
+            ;;
+        2)
+            printlog "Cancel restart button pressed"
+            restart=false
+            ;;
+        *)
+            printlog "Timer expired, proceeding with restart"
+            restart=true
+            ;;
+    esac
+    echo "progresstext: Device will restart in ${countdown} seconds" > "${dialogCommandFile}"
+    # Check for user interaction
+    sleep 1
+    ((countdown--))
+done
 
-if [[ $displayEndMessageDialog -eq 1 ]]; then
-    message="$endMessage"
-    displayDialog &
-fi
-
-sleep 1
-printlog $(rm -fv $dialog_command_file || true)
-printlog $(rm -fv $counterFile || true)
+# Close dialog and restart
+dialog_command "quit:"
+printlog $(rm -fv "${dialogCommandFile}" || true)
+printlog $(rm -fv "${progressCounterFile}" || true)
 
 printlog "Ending"
+[[ "${testingMode}" -eq 0 ]] && {
+    [[ "${restart}" = true ]] && {
+    printlog "Restarting device..."
+        sudo shutdown -r now
+    }
+}
